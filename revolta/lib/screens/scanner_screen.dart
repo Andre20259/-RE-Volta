@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:revolta/data/scan_service.dart';
 import 'package:revolta/screens/result_screen.dart';
@@ -24,10 +25,34 @@ class ScannerScreen extends StatefulWidget {
 class _ScannerScreenState extends State<ScannerScreen> {
   bool _busy = false;
 
+  // Bottles and cans carry retail barcodes; skipping QR etc. scans faster.
+  final _camera = MobileScannerController(
+    formats: const [
+      BarcodeFormat.ean13,
+      BarcodeFormat.ean8,
+      BarcodeFormat.upcA,
+      BarcodeFormat.upcE,
+    ],
+  );
+
+  @override
+  void dispose() {
+    _camera.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    final code = capture.barcodes.firstOrNull?.rawValue;
+    if (code != null) _submit(code);
+  }
+
   /// Called with each barcode, from the camera or the "type the code" sheet.
   Future<void> _submit(String code) async {
     if (_busy) return;
     setState(() => _busy = true);
+    // Stop so the camera can't fire again behind the result screen.
+    final wasRunning = _camera.value.isRunning;
+    await _camera.stop();
     final result = await widget.scanService.submit(code);
     if (!mounted) return;
     setState(() => _busy = false);
@@ -36,7 +61,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
         builder: (_) => ResultScreen(result: result, wallet: widget.wallet),
       ),
     );
-    // TODO: resume the camera here when coming back from the result screen.
+    if (wasRunning && mounted) await _camera.start();
   }
 
   Future<void> _typeCode() async {
@@ -49,10 +74,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
     );
     if (code == null || !mounted) return;
     await _submit(code);
-  }
-
-  void _toggleTorch() {
-    // TODO: switch the flash on and off once the camera is connected.
   }
 
   @override
@@ -73,10 +94,24 @@ class _ScannerScreenState extends State<ScannerScreen> {
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.flash_on, color: AppColors.torch),
-            tooltip: 'Flash',
-            onPressed: _toggleTorch,
+          ValueListenableBuilder(
+            valueListenable: _camera,
+            builder: (context, state, _) {
+              final on = state.torchState == TorchState.on;
+              return IconButton(
+                icon: Icon(
+                  on ? Icons.flash_on : Icons.flash_off,
+                  color: on ? AppColors.torch : null,
+                ),
+                tooltip: on ? 'Turn flash off' : 'Turn flash on',
+                // Disabled while the camera is off or the device has no flash.
+                onPressed:
+                    state.isRunning &&
+                        state.torchState != TorchState.unavailable
+                    ? _camera.toggleTorch
+                    : null,
+              );
+            },
           ),
         ],
       ),
@@ -94,9 +129,23 @@ class _ScannerScreenState extends State<ScannerScreen> {
               ),
               child: Stack(
                 children: [
-                  // TODO: show the camera preview here (e.g. MobileScanner
-                  // from package:mobile_scanner) and call _submit with the
-                  // first barcode it detects.
+                  Positioned.fill(
+                    child: MobileScanner(
+                      controller: _camera,
+                      onDetect: _onDetect,
+                      errorBuilder: (context, error) => const Align(
+                        alignment: Alignment.topCenter,
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text(
+                            'Camera unavailable. Type the code instead.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.white, fontSize: 16),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                   const Center(child: _ScanFrame()),
                   const Positioned(
                     left: 24,
@@ -155,53 +204,18 @@ class _ScanFrame extends StatelessWidget {
               border: Border.all(color: AppColors.scannerAccent, width: 3),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                // Stand-in for the camera image; remove with the real preview.
-                const FractionallySizedBox(
-                  widthFactor: 0.7,
-                  heightFactor: 0.55,
-                  child: CustomPaint(painter: _BarcodePainter()),
-                ),
-                Container(
-                  height: 2,
-                  margin: const EdgeInsets.symmetric(horizontal: 10),
-                  color: AppColors.scannerAccent,
-                ),
-              ],
+            child: Center(
+              child: Container(
+                height: 2,
+                margin: const EdgeInsets.symmetric(horizontal: 10),
+                color: AppColors.scannerAccent,
+              ),
             ),
           ),
         ),
       ),
     );
   }
-}
-
-class _BarcodePainter extends CustomPainter {
-  const _BarcodePainter();
-
-  /// Alternating bar and gap widths, one digit each.
-  static final _widths = '21111221113112112111311221111231112112112111'
-      .split('')
-      .map(int.parse)
-      .toList();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.white;
-    final unit = size.width / _widths.fold(0, (sum, w) => sum + w);
-    var x = 0.0;
-    for (final (i, w) in _widths.indexed) {
-      if (i.isEven) {
-        canvas.drawRect(Rect.fromLTWH(x, 0, w * unit, size.height), paint);
-      }
-      x += w * unit;
-    }
-  }
-
-  @override
-  bool shouldRepaint(_BarcodePainter oldDelegate) => false;
 }
 
 /// Bottom sheet for typing the number printed under the barcode.
